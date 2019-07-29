@@ -3,7 +3,7 @@
 #SBATCH --time=2:59:00
 #SBATCH --mem-per-cpu=256M
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --mail-type=END
 #SBATCH --mail-user=cbottrel@uvic.ca
 
