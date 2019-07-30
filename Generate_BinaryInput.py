@@ -40,9 +40,6 @@ def Generate_Files(args):
             indices = morphIDs=='non'
         objIDs = objIDs[indices]
         morphIDs = morphIDs[indices]
-        
-        objIDs = objIDs[:100]
-        morphIDs = morphIDs[:100]
 
         # initialize numpy array with shape: (len(objIDs),dx,dy,nChannels)
         outData = np.empty(shape=(len(objIDs),dx,dy,nChannels),dtype=float)
@@ -64,7 +61,7 @@ def Generate_Files(args):
         np.save(fileName,outData)
         np.save(catName,outCat)
 
-if __name__ is "__main__":
+if __name__ == "__main__":
     
     # enviornment properties
     SLURM_CPUS = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
@@ -81,12 +78,11 @@ if __name__ is "__main__":
     # input image directory
     imgDir = '/home/bottrell/scratch/Subaru/HyperSuprime/Data/Resized/'
     
-    print('Starting run.')
-
     # pool tasks
     argList = [(_fileName_.format(classID,label),_catName_.format(classID,label),imgDir,classID,filterIDs) for classID in classIDs]
     pool = multiprocessing.Pool(SLURM_CPUS)
     pool.map(Generate_Files, argList)
     pool.close()
     pool.join()
+
 
