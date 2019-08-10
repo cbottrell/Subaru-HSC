@@ -98,12 +98,12 @@ def HSC_Subaru_CNN(params):
 
     n_classes = params["n_classes"]
     x = layers.Dense(n_classes,
-                     activation="softmax" if n_classes>2 else "sigmoid",
+                     activation="softmax" if n_classes>1 else "sigmoid",
                      name="Dense_Out")(x)
 
     model = Model(inputs=inputs, outputs=x)
     model.compile(optimizer=keras.optimizers.Adadelta(),
-                  loss="categorical_crossentropy" if n_classes>2 else "binary_crossentropy")
+                  loss="categorical_crossentropy" if n_classes>1 else "binary_crossentropy")
 
     return model
 
