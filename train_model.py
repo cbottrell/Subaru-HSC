@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import string
 
 import keras
@@ -11,11 +12,26 @@ from keras.models import Model, load_model
 from keras.preprocessing.image import ImageDataGenerator
 from sklearn.model_selection import train_test_split
 
-# TODO: hyperparam search will eventually go here
+# Put other configurations that you want to try here
 hyperparam_ranges = dict(
+    conv_filters = [
+        [8, 16, 32, 64]
+    ],
 
+    fully_connected_neurons = [
+        [64, 32, 16]
+    ],
+
+    dropout_rate = [
+        0.0,
+        0.50,
+        0.75
+    ],
+
+    use_batch_norm = [
+        True,
+    ],
 )
-
 
 # TODO: consider dictionary of dictionaries
 hyperparams = dict(
@@ -77,14 +93,17 @@ def HSC_Subaru_CNN(params):
                strides=1,
                activation=params["activation"],
                name="MP_C1")(inputs)
+
     for i, filters in enumerate(params["conv_filters"][1:], 2):
         if params["use_batch_norm"]:
             x = layers.BatchNormalization()(x, name="BN_{}".format(i))
+
         x = layers.Conv2D(filters,
                           kernel_size=3,
                           strides=1,
                           activation=params["activation"],
                           name="MP_C{}".format(i))(x)
+
         x = layers.MaxPooling2D(pool_size=2, name="pooling_{}".format(i))(x)
 
     x = layers.Flatten(name="flatten")(x)
@@ -94,16 +113,18 @@ def HSC_Subaru_CNN(params):
         x = layers.Dense(neurons,
                          activation=params["activation"],
                          name="Dense_{}".format(i))
+
         x = layers.Dropout(params["dropout_rate"], name="DropFCL_{}".format(i))
 
     n_classes = params["n_classes"]
+
     x = layers.Dense(n_classes,
-                     activation="softmax" if n_classes>1 else "sigmoid",
+                     activation="softmax" if n_classes>2 else "sigmoid",
                      name="Dense_Out")(x)
 
     model = Model(inputs=inputs, outputs=x)
     model.compile(optimizer=keras.optimizers.Adadelta(),
-                  loss="categorical_crossentropy" if n_classes>1 else "binary_crossentropy")
+                  loss="categorical_crossentropy" if n_classes>2 else "binary_crossentropy")
 
     return model
 
@@ -166,25 +187,13 @@ def get_data_generator(params):
 
     return ImageDataGenerator(**dg_kwargs)
 
-def main():
-    pos_samples = get_positive_samples()
-    neg_samples = get_negative_samples()
+def train_model(model_id, params, data, model_rating_fn):
+    with open(f"{model_id}/params.json", "w") as f:
+        json.dump(params, f)
 
-    # add updating hyperparams here
-    model_id = get_random_string(8)
+    x_train, y_train, x_test, y_test = data
 
-    tt_kwargs = [
-        "train_ratio",
-        "desired_pos_ratio",
-        "negative_sample_usuage"
-        ]
-    tt_kwargs = {k:hyperparams[k] for k in tt_kwargs}
-
-    x_train, y_train, x_test, y_test = get_train_test_data(pos_samples,
-                                                           neg_samples,
-                                                           **tt_kwargs)
-
-    model = HSC_Subaru_CNN(hyperparams)
+    model = HSC_Subaru_CNN(params)
     model.summary(print_fn=summary_to_file(model_id))
 
     early_stopping = EarlyStopping(monitor="val_loss",
@@ -207,6 +216,59 @@ def main():
     model.save(f"{model_id}/model.h5")
     with open(f"{model_id}/model_hist.json", "w") as f:
         json.dump(history.history, f)
+
+    return model_rating_fn(history.history)
+
+
+def main():
+    pos_samples = get_positive_samples()
+    neg_samples = get_negative_samples()
+
+    # not sure how expensive pulling data is so I'll start hyperparam search
+    # after the data. If its really cheap, then the loop can be moved up.
+    tt_kwargs = [
+        "train_ratio",
+        "desired_pos_ratio",
+        "negative_sample_usuage"
+        ]
+
+    tt_kwargs = {k:hyperparams[k] for k in tt_kwargs}
+    data = get_train_test_data(pos_samples, neg_samples, **tt_kwargs)
+
+    # we want some way to keep the best value over each param.
+    model_rating_fn = lambda hist: min(hist["val_loss"])
+
+    # use the initial values before searching
+    model_id = get_random_string(8)
+    lowest_val = train_model(model_id, hyperparams, data, model_rating_fn)
+
+    print(f"Initial model {model_id} scored: {lowest_val}")
+
+    # shuffle the keys so that we don't rerun in the same order
+    param_list = list(hyperparam_ranges.keys())
+    random.shuffle(param_list)
+
+    # start the search!
+    for k in param_list:
+        print(f"Experimenting with {k}")
+        for val in hyperparam_ranges[k]:
+            old_hparam = hyperparams[k]
+            hyperparams[k] = val
+
+            model_id = get_random_string(8)
+
+            print(f"ModelID {model_id} Trying {val}")
+
+            curr_val = train_model(model_id, hyperparams, data, model_rating_fn)
+
+            if curr_val < lowest_val:
+                print(f"New best! current: {curr_val} prev best {lowest_val}")
+                lowest_val = curr_val
+            else:
+                print(f"No change. current: {curr_val} prev best {lowest_val}")
+                hyperparams[k] = old_hparam
+
+    print("Done!")
 
 if __name__=="__main__":
     main()
