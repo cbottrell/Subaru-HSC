@@ -24,3 +24,33 @@ class BalancedImageDataGenerator:
 
             np.random.shuffle(batch_idx)
             yield batch_xs[batch_idx], batch_ys[batch_idx]
+
+
+if __name__=="__main__":
+    import time
+
+    desired_pos_ratio = 0.5
+    batch_size = 20
+
+    pos_xs = np.random.normal(size=[160, 32, 32, 1])
+    pos_ys = np.ones([160])
+
+    neg_xs = np.random.normal(size=[840, 32, 32, 1])
+    neg_ys = np.zeros([840])
+
+    datagen = BalancedImageDataGenerator()
+
+    gen = datagen.flow(pos_xs, pos_ys, neg_xs, neg_ys, desired_pos_ratio, batch_size)
+
+    times = []
+    ratios = []
+    for i in range(20000):
+        start = time.time()
+        xs, ys = next(gen)
+        ratios.append(ys.mean())
+        times.append(time.time()-start)
+
+    print(f"Average batch ratio {np.mean(ratios)}")
+    print(f"Batches take on average {np.mean(times)} seconds")
+
+
