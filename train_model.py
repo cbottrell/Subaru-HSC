@@ -3,23 +3,36 @@ import os
 import random
 import string
 
-import keras
+import comet_ml
 import numpy as np
+import tensorflow as tf
 from astropy.io import fits
-from keras import layers
-from keras.callbacks import EarlyStopping
-from keras.models import Model, load_model
-from keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras import layers
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.utils import plot_model
+
 from sklearn.model_selection import train_test_split
+
+
+from balanced_image_datagenerator import BalancedImageDataGenerator
+from comet_callback import CometLogger
 
 # Put other configurations that you want to try here
 hyperparam_ranges = dict(
     conv_filters = [
-        [8, 16, 32, 64]
+        [8, 16, 32, 64],
+        [64, 128, 128, 256],
+        [32, 64],
+        [4, 8, 16]
     ],
 
     fully_connected_neurons = [
-        [64, 32, 16]
+        [64, 32, 16],
+        [64, 64, 128],
+        [256],
+        [16]
     ],
 
     dropout_rate = [
@@ -28,9 +41,17 @@ hyperparam_ranges = dict(
         0.75
     ],
 
-    use_batch_norm = [
-        True,
+    batch_size = [
+        16,
+        64
     ],
+
+    learning_rate = [
+        0.1,
+        0.01,
+        0.0001,
+        0.00001,
+    ]
 )
 
 # TODO: consider dictionary of dictionaries
@@ -38,21 +59,19 @@ hyperparams = dict(
     img_width = 128,
     img_height = 128,
     img_channels = 1,
-    train_epochs = 30,
-    batch_size = 32, # can this be bigger
+    train_epochs = 50,
+    train_size = 0.7,
+    batch_size = 32,
+    pos_batch_ratio = 0.50,
 
     # cnn params
-    n_classes = 2,
+    n_classes = 1,
     conv_filters = [32, 64, 128, 128],
     fully_connected_neurons = [64, 16],
-    acitvation = "relu",
-    use_batch_norm = False,
+    activation = "relu",
+    use_batch_norm = True,
     dropout_rate = 0.25,
-
-    # tt kwargs
-    train_ratio = 0.8,
-    desired_pos_ratio = 0.25,
-    negative_sample_usuage = 1.0,
+    learning_rate = 0.001,
 
     # augmentation params
     width_shift_range = 0.1,
@@ -60,18 +79,19 @@ hyperparams = dict(
     zoom_range = 0.1,
     horizontal_flip = True,
     vertical_flip = True,
+    rotation_range = 359
 )
 
 def get_positive_samples():
-    raise NotImplementedError("Connor's code here")
+    return np.load("./Data/pos_samples.npy")
 
 def get_negative_samples():
-    raise NotImplementedError("Connor's code here")
+    return np.load("./Data/neg_samples.npy")
 
 def summary_to_file(model_id):
 
     def print_fn(s):
-        with open(f"{model_id}/summary.txt", "a") as f:
+        with open(f"models/{model_id}/summary.txt", "a") as f:
             f.write(s + "\n")
 
     return print_fn
@@ -96,7 +116,7 @@ def HSC_Subaru_CNN(params):
 
     for i, filters in enumerate(params["conv_filters"][1:], 2):
         if params["use_batch_norm"]:
-            x = layers.BatchNormalization()(x, name="BN_{}".format(i))
+            x = layers.BatchNormalization(name="BN_{}".format(i))(x)
 
         x = layers.Conv2D(filters,
                           kernel_size=3,
@@ -112,67 +132,34 @@ def HSC_Subaru_CNN(params):
     for i, neurons in enumerate(params["fully_connected_neurons"]):
         x = layers.Dense(neurons,
                          activation=params["activation"],
-                         name="Dense_{}".format(i))
+                         name="Dense_{}".format(i))(x)
 
-        x = layers.Dropout(params["dropout_rate"], name="DropFCL_{}".format(i))
+        x = layers.Dropout(params["dropout_rate"], name="DropFCL_{}".format(i))(x)
 
     n_classes = params["n_classes"]
 
     x = layers.Dense(n_classes,
-                     activation="softmax" if n_classes>2 else "sigmoid",
+                     activation="softmax" if n_classes>1 else "sigmoid",
                      name="Dense_Out")(x)
 
+
+    metrics = [
+        tf.keras.metrics.BinaryAccuracy(),
+        tf.keras.metrics.FalseNegatives(),
+        tf.keras.metrics.FalsePositives(),
+        tf.keras.metrics.Precision(),
+        tf.keras.metrics.Recall(),
+        tf.keras.metrics.AUC(curve="ROC", name="auc_roc"),
+        tf.keras.metrics.AUC(curve="PR", name="auc_pr")
+
+    ]
+
     model = Model(inputs=inputs, outputs=x)
-    model.compile(optimizer=keras.optimizers.Adadelta(),
-                  loss="categorical_crossentropy" if n_classes>2 else "binary_crossentropy")
+    model.compile(optimizer=tf.keras.optimizers.Adadelta(lr=params["learning_rate"]),
+                  loss="sparse_categorical_crossentropy" if n_classes>1 else "binary_crossentropy",
+                  metrics=metrics)
 
     return model
-
-# no validation set in here!!!
-def get_train_test_data(pos_samples, # no duplicates in here
-                        neg_samples,
-                        train_ratio=0.8,
-                        desired_pos_ratio=0.25,
-                        negative_sample_usuage=1.0):
-    num_negative, num_positive = pos_samples.shape[0], neg_samples.shape[0]
-
-    if negative_sample_usuage < 1:
-        idxs = np.arange(num_negative)
-        num_negative = int(num_negative * negative_sample_usuage)
-        neg_samples = neg_samples[np.random.choice(idxs, num_negative), ...]
-
-    # figure out how many positive examples to add to reach the desired_pos_ratio
-    # P = # of positive samples
-    # N = # of negative samples
-    # r = desired P/(P+N)
-    # n = # of additional positive samples needed to reach r
-    # n = (P*(r-1) + r*N) / (1 - R)
-    num_additional_pos_examples = num_positive * (desired_pos_ratio - 1)
-    num_additional_pos_examples += desired_pos_ratio * num_positive
-    num_additional_pos_examples /= 1 - desired_pos_ratio
-    num_additional_pos_examples = int(np.ceil(num_additional_pos_examples))
-
-    # randomly select samples from the positive set to duplicate
-    idxs = np.arange(num_positive)
-    selected_idxs = np.random.choice(idxs, num_additional_pos_examples)
-    repeated_positive_examples = pos_samples[selected_idxs, ...]
-
-    pos_samples = np.concatenate((pos_samples, repeated_positive_examples))
-    num_positive = pos_samples.shape[0]
-
-    pos_labels = np.ones(num_positive)
-    neg_labels = np.zeros(num_negative)
-
-    xs = np.concatenate((pos_samples, neg_samples))
-    ys = np.concatenate((pos_labels, neg_labels))
-
-    x_train, x_test, y_train, y_test = train_test_split(xs, ys,
-                                                        train_size=train_ratio)
-
-    return (x_train,
-            keras.utils.to_categorical(y_train),
-            x_test,
-            keras.utils.to_categorical(y_test))
 
 def get_data_generator(params):
     augementation_params =[
@@ -185,62 +172,104 @@ def get_data_generator(params):
 
     dg_kwargs = {k:params[k] for k in augementation_params}
 
-    return ImageDataGenerator(**dg_kwargs)
+    return BalancedImageDataGenerator(**dg_kwargs)
 
-def train_model(model_id, params, data, model_rating_fn):
-    with open(f"{model_id}/params.json", "w") as f:
+def train_model(model_id,
+                params,
+                train_data,
+                validation_data,
+                model_rating_fn,
+                experiment):
+    tf.keras.backend.clear_session()
+
+
+    if model_id not in os.listdir("./models"):
+        os.mkdir(f"./models/{model_id}")
+
+    with open(f"models/{model_id}/params.json", "w") as f:
         json.dump(params, f)
 
-    x_train, y_train, x_test, y_test = data
+    pos_xs, pos_ys, neg_xs, neg_ys = train_data
 
     model = HSC_Subaru_CNN(params)
     model.summary(print_fn=summary_to_file(model_id))
-
+    #plot_model(model, to_file='./models/{mdoel_id}/model.png')
     early_stopping = EarlyStopping(monitor="val_loss",
                                    patience=10,
-                                   verbose=0,
+                                   verbose=1,
                                    mode="auto")
 
-    datagen = get_data_generator(hyperparams)
+    datagen = get_data_generator(params)
 
-    batches = datagen.flow(x_train,
-                           y_train,
-                           batch_size=hyperparams["batch_size"])
+    batches = datagen.flow(pos_xs,
+                           pos_ys,
+                           neg_xs,
+                           neg_ys,
+                           params["pos_batch_ratio"],
+                           params["batch_size"])
 
     history = model.fit_generator(batches,
-                                  steps_per_epoch=x_train.shape[0]//32,
-                                  epochs=hyperparams["train_epochs"],
-                                  callbacks=[early_stopping],
-                                  validation_data=(x_test, y_test))
+                                  steps_per_epoch=(pos_xs.shape[0] + neg_xs.shape[0])//params["batch_size"],
+                                  epochs=params["train_epochs"],
+                                  validation_data=validation_data,
+                                  verbose=0,
+                                  callbacks=[CometLogger(experiment)]).history
 
-    model.save(f"{model_id}/model.h5")
-    with open(f"{model_id}/model_hist.json", "w") as f:
-        json.dump(history.history, f)
+    model.save(f"models/{model_id}/model.h5")
+    with open(f"models/{model_id}/model_hist.json", "w") as f:
+        json_save = {}
 
-    return model_rating_fn(history.history)
+        for k in history:
+            if isinstance(history[k], list):
+                json_save[k] = [float(v) for v in history[k]]
+            else:
+                json_save[k] = float(history[k])
+
+        json.dump(json_save, f)
+
+    return model_rating_fn(history)
 
 
 def main():
     pos_samples = get_positive_samples()
     neg_samples = get_negative_samples()
 
-    # not sure how expensive pulling data is so I'll start hyperparam search
-    # after the data. If its really cheap, then the loop can be moved up.
-    tt_kwargs = [
-        "train_ratio",
-        "desired_pos_ratio",
-        "negative_sample_usuage"
-        ]
+    pos_train_x, pos_test_x = train_test_split(pos_samples, train_size=hyperparams["train_size"])
+    neg_train_x, neg_test_x = train_test_split(neg_samples, train_size=hyperparams["train_size"])
 
-    tt_kwargs = {k:hyperparams[k] for k in tt_kwargs}
-    data = get_train_test_data(pos_samples, neg_samples, **tt_kwargs)
+    pos_train_y = np.ones(pos_train_x.shape[0])
+    pos_test_y = np.ones(pos_test_x.shape[0])
+
+    neg_train_y = np.zeros(neg_train_x.shape[0])
+    neg_test_y = np.zeros(neg_test_x.shape[0])
+
+    train_data = pos_train_x, pos_train_y, neg_train_x, neg_train_y
+    test_x = np.concatenate((pos_test_x, neg_test_x))
+    test_y = np.concatenate((pos_test_y, neg_test_y))
+    test_data = (test_x, test_y)
 
     # we want some way to keep the best value over each param.
     model_rating_fn = lambda hist: min(hist["val_loss"])
 
+    hyperparams["random_state"] = np.random.randint(100000000)
+
     # use the initial values before searching
-    model_id = get_random_string(8)
-    lowest_val = train_model(model_id, hyperparams, data, model_rating_fn)
+    experiment = comet_ml.Experiment(api_key=os.getenv("comet_key"),
+                                     project_name="cbottrell-subaru-hsc",
+                                     workspace="kspa-subaru-hsc",
+                                     disabled=False)
+
+    model_id = experiment.get_key()
+    experiment.log_parameters(hyperparams)
+
+    lowest_val = train_model(model_id,
+                             hyperparams,
+                             train_data,
+                             test_data,
+                             model_rating_fn,
+                             experiment)
+
+    experiment.end()
 
     print(f"Initial model {model_id} scored: {lowest_val}")
 
@@ -255,11 +284,23 @@ def main():
             old_hparam = hyperparams[k]
             hyperparams[k] = val
 
-            model_id = get_random_string(8)
+            experiment = comet_ml.Experiment(api_key=os.getenv("comet_key"),
+                                             project_name="cbottrell-subaru-hsc",
+                                             workspace="kspa-subaru-hsc")
+            experiment.log_parameters(hyperparams)
 
-            print(f"ModelID {model_id} Trying {val}")
+            model_id = experiment.get_key()
 
-            curr_val = train_model(model_id, hyperparams, data, model_rating_fn)
+            print(f"ModelID {model_id} Trying {k}={val}")
+
+            curr_val = train_model(model_id,
+                                   hyperparams,
+                                   train_data,
+                                   test_data,
+                                   model_rating_fn,
+                                   experiment)
+
+            experiment.end()
 
             if curr_val < lowest_val:
                 print(f"New best! current: {curr_val} prev best {lowest_val}")
