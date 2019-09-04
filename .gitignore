@@ -129,3 +129,5 @@ dmypy.json
 *.out
 *.tar.gz
 das_pass
+
+*.npy
